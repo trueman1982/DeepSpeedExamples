@@ -27,8 +27,6 @@ $ python3 train.py --step 3 --actor-model 125m --reward-model 350m
 $ python3 train.py --step 3 --actor-model 350m --reward-model 125m
 """
 
-test
-
 import argparse
 import warnings
 import subprocess
