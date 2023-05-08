@@ -82,16 +82,17 @@ def get_raw_dataset_split_index(local_rank, output_path, dataset_name, seed,
                                 data_size):
     index_file_name = f"{output_path}/{dataset_name}_seed{seed}_{split_name}_{data_split}_{split_index}.npy"
     if not os.path.isfile(index_file_name):
-        splits = [float(s) for s in data_split.split(',')]
+        splits = [float(s) for s in data_split.split(',')] # 获得[4.0，4.0，2.0]
         splits_sum = sum(splits)
-        splits = [split / splits_sum for split in splits]
+        splits = [split / splits_sum for split in splits] # 获得[0.4，0.4，0.2]
         splits_index = [0]
         for index, split in enumerate(splits):
             splits_index.append(splits_index[index] +
-                                int(round(split * float(data_size))))
+                                int(round(split * float(data_size)))) # 假设有10000个样本，split_index=[0，4000，8000,10000]
         diff = splits_index[-1] - data_size
         for index in range(1, len(splits_index)):
             splits_index[index] -= diff
+            # 若果最后算出来的样本数超了，index都往前移
         assert splits_index[-1] == data_size
 
         shuffle_idx = get_shuffle_idx(seed, data_size)
@@ -146,6 +147,7 @@ def create_dataset_split(current_dataset, raw_dataset, train_phase, tokenizer,
     if train_phase == 1:
         for i, tmp_data in enumerate(current_dataset):
             # tokenize the text
+            # 获取prompt和正确答案（就是chosen）的string，两个string串接在一起。
             chosen_sentence = raw_dataset.get_prompt_and_chosen(
                 tmp_data)  # the accept response
             if chosen_sentence is not None:
@@ -214,14 +216,20 @@ def create_dataset_split(current_dataset, raw_dataset, train_phase, tokenizer,
 def create_dataset(local_rank, dataset_name, data_split, output_path,
                    train_phase, seed, tokenizer, end_of_conversation_token,
                    max_seq_len):
+    # 这里会创建一个基类是PromptRawDataset的类，里面记录了output_path、seed、local_rank，并且调用load_dataset获取数据
     raw_dataset = get_raw_dataset(dataset_name, output_path, seed, local_rank)
     train_dataset = raw_dataset.get_train_data()
+    # 程序会根据指定的data_split比例，将train_dataset分成三部分，分别用于sft、rm、rlhf训练。下面函数加载对应的train_phase的index文件。
+    # train_index是一个list，其中每个元素指明是train_dataset中数据的序号。
     train_index = get_raw_dataset_split_index(local_rank, output_path,
                                               raw_dataset.dataset_name_clean,
                                               seed, "train", data_split,
                                               train_phase - 1,
                                               len(train_dataset))
     train_dataset = Subset(train_dataset, train_index)
+    # raw_dataset是PromptRawDataset派生出来的类，train_dataset是torch.utils.data.Dataset类，这点容易让人疑惑
+    # 调用每个数据的类的接口函数，获取prompt字符串和response字符串，然后串接在一起，再经过tokenizer，获得模型的输入。train_dataset是一个list，
+    # 其中每个元素是一条样本经过tokenize之后的结果。
     train_dataset = create_dataset_split(train_dataset, raw_dataset,
                                          train_phase, tokenizer,
                                          end_of_conversation_token,
@@ -257,6 +265,7 @@ def create_prompt_dataset(local_rank,
     fname = "_".join(data_path)
     sft_cache_key = "_".join(sft_only_data_path)
     tokenizer_name = tokenizer.init_kwargs["name_or_path"].replace("/", "_")
+    # 用数据文件名、训练阶段（sft、rm、rlhf）、随机种子、tokenizer_name、seqlen、sft_only数据文件名来构建输出的数据文件的key
     fname = f"{fname}_split{data_split}_phase{train_phase}_seed{seed}_tokenizer{tokenizer_name}_seqlen{max_seq_len}_sft{sft_cache_key}"
     fname = "_".join(fname.split("/"))
     fname = hashlib.sha256(fname.encode()).hexdigest(
@@ -269,6 +278,7 @@ def create_prompt_dataset(local_rank,
     torch.distributed.all_reduce(buf_create_cache)
 
     if local_rank <= 0 and buf_create_cache.item() != 0:
+    # 仅有一个节点，且未找到cache file
         if len(data_path) == 1:  # Single dataset.
             train_dataset, eval_dataset = create_dataset(
                 local_rank, data_path[0], data_split, output_path, train_phase,

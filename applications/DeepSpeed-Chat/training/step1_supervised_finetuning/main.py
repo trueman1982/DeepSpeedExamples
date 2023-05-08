@@ -179,12 +179,15 @@ def main():
     if args.local_rank == -1:
         device = torch.device("cuda")
     else:
+        #local_rank是本进程在本节点上的进程id，基于进程id设置gpu device，并且获取gpu对应的device。
         torch.cuda.set_device(args.local_rank)
         device = torch.device("cuda", args.local_rank)
         # Initializes the distributed backend which will take care of sychronizing nodes/GPUs
         # torch.distributed.init_process_group(backend='nccl')
+        # init_distributed函数初始化了deepspeed的通信后端，一个全局变量cdb，但是还没有看到在哪些代码里使用的通信后端。
         deepspeed.init_distributed()
 
+    #看起来deepspeed就是在torch distributed之上实现的，因此torch distributed相关的方法都可以使用。
     args.global_rank = torch.distributed.get_rank()
 
     ds_config = get_train_ds_config(offload=args.offload,
@@ -202,9 +205,16 @@ def main():
 
     torch.distributed.barrier()
 
+    # 本来直接使用AutoTokenizer实现就可以，但是目前代码有问题，无法支持从本地模型文件中加载tokenizer，
+    # 因此实现了一个load_hf_tokenizer函数，如果_model_name_or_path给的是本地路径，则从本地路径中
+    # 获取model_json文件，从model_json文件中获取到model_name然后从远端读取tokenizer
     tokenizer = load_hf_tokenizer(args.model_name_or_path, fast_tokenizer=True)
     tokenizer.pad_token = tokenizer.eos_token
 
+    # 封装的这个函数在加载pretrained model前做了几个特别处理：
+    # 1. 修改了model_config，更改了其中的dropout、pad_token_id、end_token_id。（模型和tokenizer不是配套的吗，这个为什么也要改？）
+    # 2. resizing_embedding_size到8的整数倍。
+    # 3. 创建了HFDeepSpeedConfig，但这段没太看懂。
     model = create_hf_model(AutoModelForCausalLM,
                             args.model_name_or_path,
                             tokenizer,
@@ -212,8 +222,10 @@ def main():
                             disable_dropout=args.disable_dropout)
 
     if args.lora_dim > 0:
+        # 获取所有name包含lora_module_name的module，给其添加一个lora旁路，然后将原始weight设置为不做梯度更新。
         model = convert_linear_layer_to_lora(model, args.lora_module_name,
                                              args.lora_dim)
+        # 将除了lora_left和lora_right之外的参数都设置为不做梯度更新
         if args.only_optimize_lora:
             model = only_optimize_lora_parameters(model)
 
@@ -235,8 +247,10 @@ def main():
         train_sampler = RandomSampler(train_dataset)
         eval_sampler = SequentialSampler(eval_dataset)
     else:
+        # 当没有指定时，DistributedSampler使用world_size作为所有参与计算的进程数，使用rank作为本函数的rank参数。
         train_sampler = DistributedSampler(train_dataset)
         eval_sampler = DistributedSampler(eval_dataset)
+    #collate_fn参考这篇文章https://blog.csdn.net/dong_liuqi/article/details/114521240
     train_dataloader = DataLoader(train_dataset,
                                   collate_fn=default_data_collator,
                                   sampler=train_sampler,
@@ -268,6 +282,7 @@ def main():
         return perplexity
 
     # Split weights in two groups, one with weight decay and the other not.
+    # 所有的bias, LayerNorm.weight参数不做decay，其他参数会做decay
     optimizer_grouped_parameters = get_optimizer_grouped_parameters(
         model, args.weight_decay)
 
